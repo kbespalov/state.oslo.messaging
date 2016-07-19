@@ -15,6 +15,7 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+from oslo_messaging.rpc.state import RPCStateEndpoint
 
 __all__ = [
     'NoSuchMethod',
@@ -45,6 +46,7 @@ class ExpectedException(Exception):
     information, which  will be passed back to the RPC client without
     exceptional logging.
     """
+
     def __init__(self):
         self.exc_info = sys.exc_info()
 
@@ -102,6 +104,7 @@ class RPCDispatcher(dispatcher.DispatcherBase):
         self.endpoints = endpoints
         self.serializer = serializer or msg_serializer.NoOpSerializer()
         self._default_target = msg_target.Target()
+        self.state_endpoint = None
 
     @staticmethod
     def _is_namespace(target, namespace):
@@ -113,13 +116,31 @@ class RPCDispatcher(dispatcher.DispatcherBase):
         return utils.version_is_compatible(endpoint_version, version)
 
     def _do_dispatch(self, endpoint, method, ctxt, args):
-        ctxt = self.serializer.deserialize_context(ctxt)
+        # NOTE(kbespalov): a deserializer can require a service
+        # specific context params. to be generic, skip this step
+        # for state endpoint
+        if not isinstance(endpoint, RPCStateEndpoint):
+            ctxt = self.serializer.deserialize_context(ctxt)
+
         new_args = dict()
         for argname, arg in six.iteritems(args):
             new_args[argname] = self.serializer.deserialize_entity(ctxt, arg)
+
+        if self.profiling_enabled():
+            self.state_endpoint.register_method(endpoint, method)
+
         func = getattr(endpoint, method)
         result = func(ctxt, **new_args)
         return self.serializer.serialize_entity(ctxt, result)
+
+    def profiling_enabled(self):
+        if self.state_endpoint:
+            return self.state_endpoint.profiling_enabled()
+        return False
+
+    def register_state_endpoint(self, endpoint):
+        self.endpoints.append(endpoint)
+        self.state_endpoint = endpoint
 
     def dispatch(self, incoming):
         """Dispatch an RPC message to the appropriate endpoint method.
@@ -143,10 +164,15 @@ class RPCDispatcher(dispatcher.DispatcherBase):
                 target = self._default_target
 
             if not (self._is_namespace(target, namespace) and
-                    self._is_compatible(target, version)):
+                        self._is_compatible(target, version)):
                 continue
 
             if hasattr(endpoint, method):
+                if self.profiling_enabled():
+                    # NOTE(kbespalov) to measure time between message
+                    # receiving and dispatching to a method.
+                    time_elapsed = incoming.stopwatch.elapsed()
+                    self.state_endpoint.log_processing_delay(time_elapsed)
                 return self._do_dispatch(endpoint, method, ctxt, args)
 
             found_compatible = True

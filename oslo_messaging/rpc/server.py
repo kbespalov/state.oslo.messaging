@@ -96,6 +96,7 @@ return values from the methods. By supplying a serializer object, a server can
 deserialize a request context and arguments from - and serialize return values
 to - primitive types.
 """
+from oslo_messaging.rpc.state import RPCStateEndpoint
 
 __all__ = [
     'get_rpc_server',
@@ -179,7 +180,10 @@ def get_rpc_server(transport, target, endpoints,
     :type serializer: Serializer
     """
     dispatcher = rpc_dispatcher.RPCDispatcher(endpoints, serializer)
-    return RPCServer(transport, target, dispatcher, executor)
+    server = RPCServer(transport, target, dispatcher, executor)
+    state_endpoint = RPCStateEndpoint(server, target)
+    dispatcher.register_state_endpoint(state_endpoint)
+    return server
 
 
 def expected_exceptions(*exceptions):
